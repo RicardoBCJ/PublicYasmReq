@@ -1,8 +1,8 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Upload, Send, FileText, CheckCircle, 
   AlertCircle, Loader2, Server, Hash,
-  Copy, RefreshCw, Trash2 
+  Copy, RefreshCw, Trash2, File
 } from 'lucide-react';
 import './App.css';
 
@@ -24,16 +24,31 @@ function App() {
   // Estados da consulta
   const [question, setQuestion] = useState('');
   const [queryId, setQueryId] = useState('');
-  const [requestTreatmentId, setRequestTreatmentId] = useState(''); // NOVO
-  const [customTreatmentId, setCustomTreatmentId] = useState(''); // NOVO - campo input
+  const [requestTreatmentId, setRequestTreatmentId] = useState('');
+  const [customTreatmentId, setCustomTreatmentId] = useState('');
   const [searchId, setSearchId] = useState('');
   const [response, setResponse] = useState('');
   const [queryMode, setQueryMode] = useState('async'); // async ou sync
+  
+  // NOVOS Estados para PDF
+  const [uploadType, setUploadType] = useState('text'); // 'text' | 'pdf-async' | 'pdf-sync'
+  const [pdfFile, setPdfFile] = useState(null);
+  const [pollingStatus, setPollingStatus] = useState('');
+  
+  // Ref para controlar polling
+  const pollingRef = useRef(null);
 
   // Carregar dados iniciais
   useEffect(() => {
     loadDocuments();
     loadModels();
+    
+    // Cleanup polling on unmount
+    return () => {
+      if (pollingRef.current) {
+        clearTimeout(pollingRef.current);
+      }
+    };
   }, []);
 
   // Funções de carregamento
@@ -57,7 +72,7 @@ function App() {
     }
   };
 
-  // Upload de documento
+  // Upload de documento (texto)
   const handleUpload = async () => {
     if (!uploadFile || !docType) {
       setUploadStatus('⚠️ Selecione um arquivo e tipo de documento');
@@ -111,18 +126,22 @@ function App() {
     setLoading(true);
     setResponse('');
     setQueryId('');
+    setPollingStatus('');
 
     try {
       const res = await fetch(`${API_URL}/rag/analyze`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ Question: question, RequestTreatmentId: customTreatmentId || undefined })
+        body: JSON.stringify({ 
+          Question: question, 
+          RequestTreatmentId: customTreatmentId || undefined 
+        })
       });
 
       const data = await res.json();
       if (data.QueryId) {
         setQueryId(data.QueryId);
-        setRequestTreatmentId(data.RequestTreatmentId); // NOVO - salvar RTI
+        setRequestTreatmentId(data.RequestTreatmentId);
         setResponse('📋 Requisição enviada! Use o ID para buscar a resposta.');
       }
     } catch (error) {
@@ -131,6 +150,163 @@ function App() {
       setLoading(false);
     }
   };
+
+  // ================== NOVAS FUNÇÕES DE PDF ==================
+
+  // PDF via C# API (Assíncrono)
+  const handlePdfUploadAsync = async () => {
+    if (!pdfFile) {
+      setResponse('⚠️ Selecione um arquivo PDF');
+      return;
+    }
+
+    setLoading(true);
+    setResponse('');
+    setQueryId('');
+    setPollingStatus('📤 Enviando PDF...');
+
+    const formData = new FormData();
+    formData.append('file', pdfFile);
+    if (customTreatmentId) {
+      formData.append('requestTreatmentId', customTreatmentId);
+    }
+
+    try {
+      const res = await fetch(`${API_URL}/pdf/analyze`, {
+        method: 'POST',
+        body: formData // NÃO colocar Content-Type header
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const data = await res.json();
+      
+      if (data.QueryId) {
+        setQueryId(data.QueryId);
+        setRequestTreatmentId(data.RequestTreatmentId);
+        setResponse(
+          <div className="pdf-upload-info">
+            <p>📄 <strong>{data.FileName}</strong></p>
+            <p>📦 Tamanho: {(data.FileSize / 1024).toFixed(2)} KB</p>
+            <p>🔄 Processando... aguarde o resultado.</p>
+          </div>
+        );
+        
+        // Iniciar polling automático
+        pollForResult(data.QueryId);
+      }
+    } catch (error) {
+      setResponse('❌ Erro: ' + error.message);
+      setPollingStatus('');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Polling para resultado do PDF assíncrono
+  const pollForResult = async (queryIdToPoll) => {
+    const maxAttempts = 60; // 120 segundos (60 x 2s)
+    let attempts = 0;
+
+    const poll = async () => {
+      try {
+        setPollingStatus(`🔄 Verificando resultado... (${attempts + 1}/${maxAttempts})`);
+        
+        const res = await fetch(`${API_URL}/pdf/status/${queryIdToPoll}`);
+        
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        
+        const data = await res.json();
+
+        if (data.ProcessedAt || data.Status === 'Completed') {
+          // Resultado pronto
+          setPollingStatus('✅ Processamento concluído!');
+          if (data.RequestTreatmentId) {
+            setRequestTreatmentId(data.RequestTreatmentId);
+          }
+          setResponse(
+            <div>
+              <div className="success-badge">✅ Análise Completa</div>
+              <div dangerouslySetInnerHTML={{ __html: data.Result }} />
+            </div>
+          );
+          return;
+        }
+
+        attempts++;
+        if (attempts < maxAttempts) {
+          pollingRef.current = setTimeout(poll, 2000); // Tentar novamente em 2s
+        } else {
+          setPollingStatus('⏱️ Timeout - tente buscar manualmente pelo ID');
+          setResponse(
+            <div>
+              <p>⏱️ O processamento está demorando mais que o esperado.</p>
+              <p>Use o Query ID para buscar o resultado manualmente:</p>
+              <code>{queryIdToPoll}</code>
+            </div>
+          );
+        }
+      } catch (error) {
+        setPollingStatus('❌ Erro no polling: ' + error.message);
+      }
+    };
+
+    poll();
+  };
+
+  // PDF via Python (Síncrono)
+  const handlePdfUploadSync = async () => {
+    if (!pdfFile) {
+      setResponse('⚠️ Selecione um arquivo PDF');
+      return;
+    }
+
+    setLoading(true);
+    setResponse('');
+    setPollingStatus('📤 Enviando PDF para análise direta...');
+
+    const formData = new FormData();
+    formData.append('file', pdfFile);
+
+    try {
+      const res = await fetch(`${PYTHON_URL}/query/pdf`, {
+        method: 'POST',
+        body: formData // NÃO colocar Content-Type header
+      });
+
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
+
+      const data = await res.json();
+      setPollingStatus('');
+
+      if (data.result) {
+        setResponse(
+          <div>
+            <div className="pdf-info-banner">
+              📄 {data.page_count || '?'} página(s) | 
+              Método: {data.extraction_method || 'auto'}
+            </div>
+            <div dangerouslySetInnerHTML={{ __html: data.result }} />
+          </div>
+        );
+      } else if (data.error) {
+        setResponse('❌ Erro: ' + data.error);
+      }
+    } catch (error) {
+      setResponse('❌ Erro: ' + error.message);
+      setPollingStatus('');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // ================== FIM NOVAS FUNÇÕES ==================
 
   // Buscar resposta por ID
   const handleGetResponse = async () => {
@@ -142,23 +318,29 @@ function App() {
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_URL}/rag/status/${id}`);
-      const data = await res.json();
+      // Tentar primeiro o endpoint de RAG
+      let res = await fetch(`${API_URL}/rag/status/${id}`);
+      let data = await res.json();
+
+      // Se não encontrou no RAG, tentar no PDF
+      if (!data.Result && !data.ProcessedAt) {
+        res = await fetch(`${API_URL}/pdf/status/${id}`);
+        data = await res.json();
+      }
 
       if (data.Result) {
-        console.log(data.Result)
+        console.log(data.Result);
         if (data.RequestTreatmentId) {
-          setRequestTreatmentId(data.RequestTreatmentId); // Atualizar RTI da resposta
+          setRequestTreatmentId(data.RequestTreatmentId);
         }
-        // Se Result é HTML, vamos exibi-lo
         setResponse(
           <div dangerouslySetInnerHTML={{ __html: data.Result }} />
         );
       } else if (data.ProcessedAt === null) {
-        console.log(data)
+        console.log(data);
         setResponse('⏳ Ainda processando... Tente novamente em alguns segundos.');
       } else {
-        setResponse('📭 Nenhum resultado encontrado.');
+        setResponse('🔭 Nenhum resultado encontrado.');
       }
     } catch (error) {
       setResponse('❌ Erro: ' + error.message);
@@ -179,7 +361,10 @@ function App() {
       const res = await fetch(`${PYTHON_URL}${endpoint}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ Question: question, RequestTreatmentId: customTreatmentId || undefined })
+        body: JSON.stringify({ 
+          question: question, 
+          RequestTreatmentId: customTreatmentId || undefined 
+        })
       });
 
       const data = await res.json();
@@ -195,16 +380,49 @@ function App() {
     }
   };
 
+  // Handler unificado para envio
+  const handleSubmit = () => {
+    if (uploadType === 'text') {
+      if (queryMode === 'async') {
+        handleSendQuestion();
+      } else {
+        handleDirectQuery();
+      }
+    } else if (uploadType === 'pdf-async') {
+      handlePdfUploadAsync();
+    } else if (uploadType === 'pdf-sync') {
+      handlePdfUploadSync();
+    }
+  };
+
+  // Verificar se pode enviar
+  const canSubmit = () => {
+    if (loading) return false;
+    if (uploadType === 'text') {
+      return question.trim().length > 0;
+    } else {
+      return pdfFile !== null;
+    }
+  };
+
   // Copiar ID para clipboard
   const copyToClipboard = (text) => {
     navigator.clipboard.writeText(text);
     alert('ID copiado!');
   };
 
+  // Limpar seleção de PDF
+  const clearPdfSelection = () => {
+    setPdfFile(null);
+    // Limpar o input file
+    const fileInput = document.getElementById('pdf-input');
+    if (fileInput) fileInput.value = '';
+  };
+
   return (
     <div className="app">
       <header className="app-header">
-        <h1> Yasmin RAG Interface</h1>
+        <h1>🏥 Yasmin RAG Interface</h1>
         <div className="status-bar">
           <span className={models.length > 0 ? 'status-ok' : 'status-error'}>
             <Server size={16} />
@@ -303,72 +521,149 @@ function App() {
           <div className="query-section">
             <h2>Consulta RAG</h2>
 
-            {/* Modo de Consulta */}
-            <div className="query-mode">
-              <label>
-                <input 
-                  type="radio"
-                  value="async"
-                  checked={queryMode === 'async'}
-                  onChange={(e) => setQueryMode(e.target.value)}
-                />
-                Assíncrono (RabbitMQ)
-              </label>
-              <label>
-                <input 
-                  type="radio"
-                  value="sync"
-                  checked={queryMode === 'sync'}
-                  onChange={(e) => setQueryMode(e.target.value)}
-                />
-                Síncrono (Direto)
-              </label>
+            {/* Tipo de Input (Texto ou PDF) */}
+            <div className="upload-type-selector">
+              <h4>📎 Tipo de Entrada</h4>
+              <div className="radio-group">
+                <label className={uploadType === 'text' ? 'radio-label active' : 'radio-label'}>
+                  <input 
+                    type="radio"
+                    value="text"
+                    checked={uploadType === 'text'}
+                    onChange={(e) => setUploadType(e.target.value)}
+                  />
+                  📝 Texto
+                </label>
+                <label className={uploadType === 'pdf-async' ? 'radio-label active' : 'radio-label'}>
+                  <input 
+                    type="radio"
+                    value="pdf-async"
+                    checked={uploadType === 'pdf-async'}
+                    onChange={(e) => setUploadType(e.target.value)}
+                  />
+                  📄 PDF (Assíncrono)
+                </label>
+                <label className={uploadType === 'pdf-sync' ? 'radio-label active' : 'radio-label'}>
+                  <input 
+                    type="radio"
+                    value="pdf-sync"
+                    checked={uploadType === 'pdf-sync'}
+                    onChange={(e) => setUploadType(e.target.value)}
+                  />
+                  📄 PDF (Síncrono)
+                </label>
+              </div>
             </div>
 
-            {/* Input de Pergunta */}
-            <div className="question-input">
-              <textarea 
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                placeholder="Digite sua pergunta sobre as diretrizes..."
-                rows={4}
-                className="textarea"
-              />
+            {/* Modo de Consulta (apenas para texto) */}
+            {uploadType === 'text' && (
+              <div className="query-mode">
+                <h4>🔄 Modo de Processamento</h4>
+                <div className="radio-group">
+                  <label className={queryMode === 'async' ? 'radio-label active' : 'radio-label'}>
+                    <input 
+                      type="radio"
+                      value="async"
+                      checked={queryMode === 'async'}
+                      onChange={(e) => setQueryMode(e.target.value)}
+                    />
+                    Assíncrono (RabbitMQ)
+                  </label>
+                  <label className={queryMode === 'sync' ? 'radio-label active' : 'radio-label'}>
+                    <input 
+                      type="radio"
+                      value="sync"
+                      checked={queryMode === 'sync'}
+                      onChange={(e) => setQueryMode(e.target.value)}
+                    />
+                    Síncrono (Direto)
+                  </label>
+                </div>
+              </div>
+            )}
 
-              <div className="custom-treatment-id">
-                <input 
-                  type="text"
-                  value={customTreatmentId}
-                  onChange={(e) => setCustomTreatmentId(e.target.value)}
-                  placeholder="RequestTreatmentId customizado (opcional)"
-                  className="input"
-                  style={{marginTop: '10px'}}
+            {/* Input de Texto (quando texto selecionado) */}
+            {uploadType === 'text' && (
+              <div className="question-input">
+                <textarea 
+                  value={question}
+                  onChange={(e) => setQuestion(e.target.value)}
+                  placeholder="Digite sua pergunta sobre as diretrizes..."
+                  rows={4}
+                  className="textarea"
                 />
               </div>
-              
-              {queryMode === 'async' ? (
-                <button 
-                  onClick={handleSendQuestion}
-                  disabled={loading}
-                  className="btn btn-primary"
-                >
-                  {loading ? <Loader2 className="spin" /> : <Send />}
-                  Enviar Pergunta
-                </button>
-              ) : (
-                <button 
-                  onClick={handleDirectQuery}
-                  disabled={loading}
-                  className="btn btn-primary"
-                >
-                  {loading ? <Loader2 className="spin" /> : <Send />}
-                  Consultar
-                </button>
-              )}
+            )}
+
+            {/* Input de PDF (quando PDF selecionado) */}
+            {(uploadType === 'pdf-async' || uploadType === 'pdf-sync') && (
+              <div className="pdf-input-section">
+                <h4>📄 Selecione o PDF</h4>
+                <div className="pdf-input-controls">
+                  <input 
+                    id="pdf-input"
+                    type="file"
+                    accept=".pdf"
+                    onChange={(e) => setPdfFile(e.target.files[0])}
+                    className="file-input"
+                  />
+                  {pdfFile && (
+                    <div className="pdf-selected">
+                      <File size={16} />
+                      <span className="file-name">{pdfFile.name}</span>
+                      <span className="file-size">
+                        ({(pdfFile.size / 1024).toFixed(2)} KB)
+                      </span>
+                      <button 
+                        onClick={clearPdfSelection}
+                        className="btn-icon small"
+                        title="Remover arquivo"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    </div>
+                  )}
+                </div>
+                <p className="hint">
+                  {uploadType === 'pdf-async' 
+                    ? '⚡ Processamento assíncrono via RabbitMQ - ideal para PDFs grandes'
+                    : '🔄 Processamento síncrono direto - resposta imediata'}
+                </p>
+              </div>
+            )}
+
+            {/* Campo de Treatment ID customizado */}
+            <div className="custom-treatment-id">
+              <input 
+                type="text"
+                value={customTreatmentId}
+                onChange={(e) => setCustomTreatmentId(e.target.value)}
+                placeholder="RequestTreatmentId customizado (opcional)"
+                className="input"
+              />
             </div>
 
-            {/* Request ID (para modo assíncrono) */}
-            {queryMode === 'async' && queryId && (
+            {/* Botão de Envio */}
+            <div className="submit-section">
+              <button 
+                onClick={handleSubmit}
+                disabled={!canSubmit()}
+                className="btn btn-primary btn-large"
+              >
+                {loading ? <Loader2 className="spin" /> : <Send />}
+                {uploadType === 'text' ? 'Enviar Pergunta' : 'Analisar PDF'}
+              </button>
+            </div>
+
+            {/* Status de Polling */}
+            {pollingStatus && (
+              <div className="polling-status">
+                {pollingStatus}
+              </div>
+            )}
+
+            {/* Request ID (para modos assíncronos) */}
+            {(uploadType === 'text' && queryMode === 'async' || uploadType === 'pdf-async') && queryId && (
               <div className="request-id-section">
                 <h3>📋 Query ID</h3>
                 <div className="id-display">
@@ -376,21 +671,22 @@ function App() {
                   <button 
                     onClick={() => copyToClipboard(queryId)}
                     className="btn-icon"
+                    title="Copiar ID"
                   >
                     <Copy size={16} />
                   </button>
                 </div>
 
                 {requestTreatmentId && (
-                  <div style={{marginTop: '8px', fontSize: '0.9em', color: '#666'}}>
-                    Treatment: {requestTreatmentId}
+                  <div className="treatment-id-display">
+                    Treatment ID: <code>{requestTreatmentId}</code>
                   </div>
                 )}
               </div>
             )}
 
             {/* Buscar por ID */}
-            {queryMode === 'async' && (
+            {(uploadType === 'text' && queryMode === 'async' || uploadType === 'pdf-async') && (
               <div className="search-section">
                 <h3>🔍 Buscar Resposta por ID</h3>
                 <div className="search-controls">
@@ -422,13 +718,15 @@ function App() {
                 </div>
 
                 {requestTreatmentId && (
-                  <div>
-                    <div style={{marginTop: '8px', fontSize: '0.9em', color: '#666'}}>
-                      Treatment: {requestTreatmentId}
+                  <div className="response-meta">
+                    <div className="meta-item">
+                      <strong>Treatment ID:</strong> {requestTreatmentId}
                     </div>
-                    <div style={{marginTop: '8px', fontSize: '0.9em', color: '#666'}}>
-                      Treatment: {queryId}
-                    </div>
+                    {queryId && (
+                      <div className="meta-item">
+                        <strong>Query ID:</strong> {queryId}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -444,6 +742,7 @@ function App() {
               <button 
                 onClick={loadDocuments}
                 className="btn-icon"
+                title="Atualizar lista"
               >
                 <RefreshCw size={20} />
               </button>
@@ -465,6 +764,7 @@ function App() {
                     <button 
                       onClick={() => handleDelete(doc.id)}
                       className="btn-icon delete"
+                      title="Deletar documento"
                     >
                       <Trash2 size={16} />
                     </button>
@@ -477,6 +777,15 @@ function App() {
           </div>
         )}
       </main>
+
+      {/* Footer com informações */}
+      <footer className="app-footer">
+        <div className="footer-info">
+          <span>API C#: {API_URL}</span>
+          <span>|</span>
+          <span>Python: {PYTHON_URL}</span>
+        </div>
+      </footer>
     </div>
   );
 }
