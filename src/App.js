@@ -72,7 +72,42 @@ function App() {
     }
   };
 
-  // Upload de documento (texto)
+  // // Upload de documento (texto)
+  // const handleUpload = async () => {
+  //   if (!uploadFile || !docType) {
+  //     setUploadStatus('⚠️ Selecione um arquivo e tipo de documento');
+  //     return;
+  //   }
+
+  //   setLoading(true);
+  //   setUploadStatus('📤 Enviando...');
+
+  //   try {
+  //     const text = await uploadFile.text();
+  //     const res = await fetch(`${PYTHON_URL}/process`, {
+  //       method: 'POST',
+  //       headers: { 'Content-Type': 'application/json' },
+  //       body: JSON.stringify({
+  //         content: text,
+  //         doc_type: docType
+  //       })
+  //     });
+
+  //     if (res.ok) {
+  //       setUploadStatus('✅ Upload realizado com sucesso!');
+  //       loadDocuments();
+  //       setUploadFile(null);
+  //     } else {
+  //       setUploadStatus('❌ Erro no upload');
+  //     }
+  //   } catch (error) {
+  //     setUploadStatus('❌ Erro: ' + error.message);
+  //   } finally {
+  //     setLoading(false);
+  //   }
+  // };
+
+  // Upload de documento (texto OU PDF)
   const handleUpload = async () => {
     if (!uploadFile || !docType) {
       setUploadStatus('⚠️ Selecione um arquivo e tipo de documento');
@@ -83,22 +118,48 @@ function App() {
     setUploadStatus('📤 Enviando...');
 
     try {
-      const text = await uploadFile.text();
-      const res = await fetch(`${PYTHON_URL}/process`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          content: text,
-          doc_type: docType
-        })
-      });
+      const isPdf = uploadFile.name.toLowerCase().endsWith('.pdf');
+      
+      if (isPdf) {
+        // ✅ PDF: Usar /process/pdf com FormData
+        const formData = new FormData();
+        formData.append('file', uploadFile);
+        formData.append('doc_type', docType);
+        
+        const res = await fetch(`${PYTHON_URL}/process/pdf`, {
+          method: 'POST',
+          body: formData  // NÃO colocar Content-Type header!
+        });
 
-      if (res.ok) {
-        setUploadStatus('✅ Upload realizado com sucesso!');
-        loadDocuments();
-        setUploadFile(null);
+        if (res.ok) {
+          const data = await res.json();
+          setUploadStatus(`✅ PDF processado! ${data.page_count} páginas, ${data.chunks_added} chunks extraídos`);
+          loadDocuments();
+          setUploadFile(null);
+        } else {
+          const error = await res.json();
+          setUploadStatus('❌ Erro: ' + (error.error || 'Falha no processamento'));
+        }
       } else {
-        setUploadStatus('❌ Erro no upload');
+        // Texto: Usar /process (comportamento original)
+        const text = await uploadFile.text();
+        const res = await fetch(`${PYTHON_URL}/process`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            content: text,
+            doc_type: docType
+          })
+        });
+
+        if (res.ok) {
+          const data = await res.json();
+          setUploadStatus(`✅ Texto processado! ${data.optimized_chunks} chunks`);
+          loadDocuments();
+          setUploadFile(null);
+        } else {
+          setUploadStatus('❌ Erro no upload');
+        }
       }
     } catch (error) {
       setUploadStatus('❌ Erro: ' + error.message);
