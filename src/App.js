@@ -33,6 +33,7 @@ function App() {
   // NOVOS Estados para PDF
   const [uploadType, setUploadType] = useState('text'); // 'text' | 'pdf-async' | 'pdf-sync'
   const [pdfFile, setPdfFile] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);  // NOVO - para drag and drop
   const [pollingStatus, setPollingStatus] = useState('');
   
   // Ref para controlar polling
@@ -71,41 +72,6 @@ function App() {
       console.error('Erro ao carregar modelos:', error);
     }
   };
-
-  // // Upload de documento (texto)
-  // const handleUpload = async () => {
-  //   if (!uploadFile || !docType) {
-  //     setUploadStatus('⚠️ Selecione um arquivo e tipo de documento');
-  //     return;
-  //   }
-
-  //   setLoading(true);
-  //   setUploadStatus('📤 Enviando...');
-
-  //   try {
-  //     const text = await uploadFile.text();
-  //     const res = await fetch(`${PYTHON_URL}/process`, {
-  //       method: 'POST',
-  //       headers: { 'Content-Type': 'application/json' },
-  //       body: JSON.stringify({
-  //         content: text,
-  //         doc_type: docType
-  //       })
-  //     });
-
-  //     if (res.ok) {
-  //       setUploadStatus('✅ Upload realizado com sucesso!');
-  //       loadDocuments();
-  //       setUploadFile(null);
-  //     } else {
-  //       setUploadStatus('❌ Erro no upload');
-  //     }
-  //   } catch (error) {
-  //     setUploadStatus('❌ Erro: ' + error.message);
-  //   } finally {
-  //     setLoading(false);
-  //   }
-  // };
 
   // Upload de documento (texto OU PDF)
   const handleUpload = async () => {
@@ -480,6 +446,42 @@ function App() {
     if (fileInput) fileInput.value = '';
   };
 
+  // ================== DRAG AND DROP HANDLERS ==================
+  
+  // Quando arquivo é arrastado sobre a área
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  // Quando arquivo sai da área
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  // Quando arquivo é solto na área
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      const file = files[0];
+      // Verifica se é PDF
+      if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
+        setPdfFile(file);
+      } else {
+        alert('Por favor, selecione apenas arquivos PDF');
+      }
+    }
+  };
+
+  // ================== FIM DRAG AND DROP ==================
+
   return (
     <div className="app">
       <header className="app-header">
@@ -656,10 +658,30 @@ function App() {
               </div>
             )}
 
-            {/* Input de PDF (quando PDF selecionado) */}
+            {/* Input de PDF (quando PDF selecionado) - COM DRAG AND DROP */}
             {(uploadType === 'pdf-async' || uploadType === 'pdf-sync') && (
-              <div className="pdf-input-section">
+              <div 
+                className={`pdf-input-section ${isDragging ? 'dragging' : ''}`}
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+              >
                 <h4>📄 Selecione o PDF</h4>
+                
+                {/* Área de Drag and Drop */}
+                <div 
+                  className={`drop-zone ${isDragging ? 'drop-zone-active' : ''}`}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                >
+                  <p className="drop-zone-text">
+                    {isDragging 
+                      ? '📥 Solte o arquivo aqui!' 
+                      : '🖱️ Arraste um PDF aqui ou clique no botão abaixo'}
+                  </p>
+                </div>
+                
                 <div className="pdf-input-controls">
                   <input 
                     id="pdf-input"
